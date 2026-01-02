@@ -1,0 +1,66 @@
+# -------------------------
+# Node / Yarn
+# -------------------------
+node_modules/
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# -------------------------
+# Environment variables
+# -------------------------
+.env
+.env.*
+!.env.example
+
+# -------------------------
+# Prisma
+# -------------------------
+prisma/migrations/dev.db
+prisma/migrations/dev.db-journal
+prisma/migrations/*.db
+prisma/migrations/*.db-journal
+
+# Prisma generated client (generated on install)
+src/generated/prisma/
+
+# -------------------------
+# Build / runtime
+# -------------------------
+dist/
+build/
+coverage/
+
+# -------------------------
+# TypeScript
+# -------------------------
+*.tsbuildinfo
+
+# -------------------------
+# Logs
+# -------------------------
+logs/
+*.log
+
+# -------------------------
+# OS / Editor
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# -------------------------
+# Misc
+# -------------------------
+*.pem
+*.key
