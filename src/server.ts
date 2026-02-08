@@ -6,8 +6,9 @@ import jwt from "jsonwebtoken";
 import { z } from "zod";
 import cookieParser from "cookie-parser";
 import { prisma } from "./prisma";
+import path from "path";
 
-dotenv.config();
+dotenv.config({ path: path.resolve("/var/www/anti-scam-api/.env") });
 
 const app = express();
 
@@ -34,7 +35,7 @@ app.use(
       // origin может быть undefined (Postman/server-to-server)
       if (!origin) return cb(null, true);
       if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
+      return cb(null, false);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
