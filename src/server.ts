@@ -1,5 +1,4 @@
 import express from "express";
-import cors from "cors";
 import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
@@ -13,21 +12,12 @@ dotenv.config({ path: path.resolve("/var/www/anti-scam-api/.env") });
 const app = express();
 
 /**
- * Если ты под nginx/https прокси (обычно да), это важно для secure cookies.
+ * Если ты под nginx/https прокси, это важно для secure cookies
  */
 app.set("trust proxy", 1);
 
 app.use(express.json());
 app.use(cookieParser());
-
-/**
- * CORS: если используешь cookies (credentials), нельзя ставить origin="*".
- * Должен быть конкретный origin.
- */
-const allowedOrigins = (process.env.CORS_ORIGINS ?? "http://localhost:3000")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
 
 /**
  * ENV
@@ -55,7 +45,7 @@ const cookieRefreshName = process.env.COOKIE_REFRESH_NAME ?? "refresh_token";
 
 const cookieBase = {
   httpOnly: true,
-  secure: isProd, // в проде только https
+  secure: isProd,
   sameSite: (isProd ? "none" : "lax") as "none" | "lax",
   path: "/",
 };
@@ -93,6 +83,17 @@ const AuthSchema = z.object({
   password: z.string().min(8).max(72),
 });
 
+const ChangePasswordSchema = z
+  .object({
+    oldPassword: z.string().min(8).max(72),
+    newPassword: z.string().min(8).max(72),
+    revokeAllSessions: z.boolean().optional(),
+  })
+  .refine((d) => d.oldPassword !== d.newPassword, {
+    message: "New password must be different from old password",
+    path: ["newPassword"],
+  });
+
 function signAccessToken(userId: string) {
   return jwt.sign({ sub: userId }, ACCESS_SECRET, {
     expiresIn: `${ACCESS_TTL_MIN}m`,
@@ -109,6 +110,19 @@ function addDays(date: Date, days: number) {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
   return d;
+}
+
+function getUserIdFromAccessCookie(req: express.Request): string | null {
+  const accessToken = req.cookies?.[cookieAccessName];
+  if (!accessToken || typeof accessToken !== "string") return null;
+
+  try {
+    const payload: any = jwt.verify(accessToken, ACCESS_SECRET);
+    const userId = payload?.sub;
+    return typeof userId === "string" ? userId : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -131,7 +145,6 @@ app.post("/auth/signup", async (req, res) => {
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   const user = await prisma.user.create({ data: { email, passwordHash } });
 
-  // session + refresh
   const session = await prisma.session.create({
     data: {
       userId: user.id,
@@ -150,10 +163,8 @@ app.post("/auth/signup", async (req, res) => {
 
   const accessToken = signAccessToken(user.id);
 
-  // ✅ ставим cookies
   setAuthCookies(res, accessToken, refreshToken);
 
-  // ✅ фронту токены не отдаем
   return res.status(201).json({
     user: { id: user.id, email: user.email },
   });
@@ -193,7 +204,6 @@ app.post("/auth/login", async (req, res) => {
 
   const accessToken = signAccessToken(user.id);
 
-  // ✅ ставим cookies
   setAuthCookies(res, accessToken, refreshToken);
 
   return res.json({
@@ -201,9 +211,6 @@ app.post("/auth/login", async (req, res) => {
   });
 });
 
-/**
- * Refresh теперь берёт refresh token из cookie, а не из body.
- */
 app.post("/auth/refresh", async (req, res) => {
   const refreshToken = req.cookies?.[cookieRefreshName];
   if (!refreshToken || typeof refreshToken !== "string") {
@@ -239,7 +246,6 @@ app.post("/auth/refresh", async (req, res) => {
     return res.status(401).json({ error: "Invalid refresh token" });
   }
 
-  // rotation refresh
   const newRefreshToken = signRefreshToken(session.id, userId);
   const newRefreshHash = await bcrypt.hash(newRefreshToken, BCRYPT_ROUNDS);
 
@@ -253,7 +259,6 @@ app.post("/auth/refresh", async (req, res) => {
 
   const newAccessToken = signAccessToken(userId);
 
-  // ✅ обновляем cookies
   setAuthCookies(res, newAccessToken, newRefreshToken);
 
   return res.json({ ok: true });
@@ -276,27 +281,66 @@ app.post("/auth/logout", async (req, res) => {
   return res.json({ ok: true });
 });
 
-/**
- * Вспомогательный endpoint чтобы проверить, что cookie реально доходит
- */
 app.get("/auth/me", async (req, res) => {
-  const accessToken = req.cookies?.[cookieAccessName];
-  if (!accessToken || typeof accessToken !== "string") {
+  const userId = getUserIdFromAccessCookie(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true },
+  });
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+
+  return res.json({ user });
+});
+
+/**
+ * ✅ Смена пароля: старый + новый.
+ * Требует, чтобы access cookie была валидной (то есть юзер залогинен).
+ */
+app.post("/auth/change-password", async (req, res) => {
+  const userId = getUserIdFromAccessCookie(req);
+  if (!userId) {
+    clearAuthCookies(res);
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  try {
-    const payload: any = jwt.verify(accessToken, ACCESS_SECRET);
-    const userId = payload.sub as string;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { id: true, email: true },
-    });
-    if (!user) return res.status(401).json({ error: "Unauthorized" });
-    return res.json({ user });
-  } catch {
+  const parsed = ChangePasswordSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid input", details: parsed.error.flatten() });
+  }
+
+  const { oldPassword, newPassword, revokeAllSessions } = parsed.data;
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, passwordHash: true },
+  });
+
+  if (!user) {
+    clearAuthCookies(res);
     return res.status(401).json({ error: "Unauthorized" });
   }
+
+  const ok = await bcrypt.compare(oldPassword, user.passwordHash);
+  if (!ok) return res.status(401).json({ error: "Old password is incorrect" });
+
+  const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { passwordHash: newHash },
+  });
+
+  if (revokeAllSessions) {
+    await prisma.session.deleteMany({ where: { userId: user.id } });
+    clearAuthCookies(res);
+    return res.json({ ok: true, revoked: true });
+  }
+
+  return res.json({ ok: true });
 });
 
 const PORT = Number(process.env.PORT || 4000);
