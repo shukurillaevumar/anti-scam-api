@@ -43,9 +43,6 @@ app.use(
   }),
 );
 
-// preflight
-app.options(/.*/, cors({ origin: allowedOrigins, credentials: true }));
-
 /**
  * ENV
  */
