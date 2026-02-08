@@ -343,6 +343,52 @@ app.post("/auth/change-password", async (req, res) => {
   return res.json({ ok: true });
 });
 
+const ChangePasswordByEmailSchema = z
+  .object({
+    email: z
+      .string()
+      .email()
+      .max(254)
+      .transform((v) => v.trim().toLowerCase()),
+    oldPassword: z.string().min(8).max(72),
+    newPassword: z.string().min(8).max(72),
+  })
+  .refine((d) => d.oldPassword !== d.newPassword, {
+    message: "New password must be different from old password",
+    path: ["newPassword"],
+  });
+
+app.post("/auth/change-password-by-email", async (req, res) => {
+  const parsed = ChangePasswordByEmailSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid input", details: parsed.error.flatten() });
+  }
+
+  const { email, oldPassword, newPassword } = parsed.data;
+
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true, email: true, passwordHash: true },
+  });
+
+  // одинаковый ответ, чтобы не палить существование email (опционально, но правильно)
+  if (!user) return res.status(401).json({ error: "Invalid credentials" });
+
+  const ok = await bcrypt.compare(oldPassword, user.passwordHash);
+  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+  const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { passwordHash: newHash },
+  });
+
+  return res.json({ ok: true });
+});
+
 const PORT = Number(process.env.PORT || 4000);
 
 app.listen(PORT, () => {
