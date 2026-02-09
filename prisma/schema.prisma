@@ -7,12 +7,39 @@ datasource db {
   provider = "postgresql"
 }
 
+/** роли и статусы пользователя */
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  BLOCKED
+}
+
+/** статус заявки регистрации */
+enum RequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
   passwordHash String
   createdAt    DateTime @default(now())
-  sessions     Session[]
+
+  /** добавили */
+  role   UserRole   @default(USER)
+  status UserStatus @default(PENDING)
+
+  sessions Session[]
+
+  /** добавили */
+  registrationRequests RegistrationRequest[]
 }
 
 model Session {
@@ -22,4 +49,24 @@ model Session {
   refreshHash String
   createdAt   DateTime @default(now())
   expiresAt   DateTime
+}
+
+/** новая таблица для заявок + IP */
+model RegistrationRequest {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ip        String
+  userAgent String?
+
+  status    RequestStatus @default(PENDING)
+
+  reviewedBy String?
+  reviewedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([status, createdAt])
+  @@index([userId])
 }

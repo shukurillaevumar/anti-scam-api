@@ -48,6 +48,7 @@ const cookieBase = {
   secure: isProd,
   sameSite: (isProd ? "none" : "lax") as "none" | "lax",
   path: "/",
+  // domain: "gfta-api.online", // можно включить при желании. обычно не нужно.
 };
 
 function setAuthCookies(
@@ -126,6 +127,54 @@ function getUserIdFromAccessCookie(req: express.Request): string | null {
 }
 
 /**
+ * ✅ IP / UA helpers (added)
+ */
+function getClientIp(req: express.Request) {
+  const cf = req.headers["cf-connecting-ip"];
+  if (typeof cf === "string" && cf.trim()) return cf.trim();
+
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.trim()) return xff.split(",")[0]!.trim();
+
+  const ra = req.socket?.remoteAddress;
+  return typeof ra === "string" ? ra : "unknown";
+}
+
+type AuthedRequest = express.Request & { userId?: string };
+
+function requireAuth(
+  req: AuthedRequest,
+  res: express.Response,
+  next: express.NextFunction,
+) {
+  const userId = getUserIdFromAccessCookie(req);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  req.userId = userId;
+  next();
+}
+
+async function requireAdmin(
+  req: AuthedRequest,
+  res: express.Response,
+  next: express.NextFunction,
+) {
+  const userId = req.userId;
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  const u = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, status: true },
+  });
+
+  if (!u) return res.status(401).json({ error: "Unauthorized" });
+  if (u.status === "BLOCKED")
+    return res.status(403).json({ error: "Forbidden" });
+  if (u.role !== "ADMIN") return res.status(403).json({ error: "Forbidden" });
+
+  next();
+}
+
+/**
  * ROUTES
  */
 
@@ -143,7 +192,30 @@ app.post("/auth/signup", async (req, res) => {
   if (exists) return res.status(409).json({ error: "Email already in use" });
 
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-  const user = await prisma.user.create({ data: { email, passwordHash } });
+
+  // added
+  const ip = getClientIp(req);
+  const userAgent =
+    typeof req.headers["user-agent"] === "string"
+      ? req.headers["user-agent"]
+      : undefined;
+
+  // ✅ создаём PENDING пользователя и заявку с IP (added)
+  const user = await prisma.user.create({
+    data: {
+      email,
+      passwordHash,
+      role: "USER",
+      status: "PENDING",
+      registrationRequests: {
+        create: {
+          ip,
+          userAgent,
+          status: "PENDING",
+        },
+      },
+    },
+  });
 
   const session = await prisma.session.create({
     data: {
@@ -285,9 +357,10 @@ app.get("/auth/me", async (req, res) => {
   const userId = getUserIdFromAccessCookie(req);
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
+  // updated: role/status added
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, email: true },
+    select: { id: true, email: true, role: true, status: true },
   });
   if (!user) return res.status(401).json({ error: "Unauthorized" });
 
@@ -388,6 +461,218 @@ app.post("/auth/change-password-by-email", async (req, res) => {
 
   return res.json({ ok: true });
 });
+
+/**
+ * ============================
+ * ✅ ADMIN ENDPOINTS (added)
+ * ============================
+ */
+
+/**
+ * GET /admin/registration-requests?status=PENDING|APPROVED|REJECTED&search=...
+ */
+app.get(
+  "/admin/registration-requests",
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    const status = String(req.query.status ?? "PENDING").toUpperCase();
+    const search = String(req.query.search ?? "").trim();
+
+    const safeStatus = ["PENDING", "APPROVED", "REJECTED"].includes(status)
+      ? (status as any)
+      : ("PENDING" as any);
+
+    const items = await prisma.registrationRequest.findMany({
+      where: {
+        status: safeStatus,
+        ...(search
+          ? {
+              OR: [
+                { ip: { contains: search, mode: "insensitive" } },
+                { userAgent: { contains: search, mode: "insensitive" } },
+                { user: { email: { contains: search, mode: "insensitive" } } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            status: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    return res.json({ items });
+  },
+);
+
+/**
+ * POST /admin/registration-requests/:id/approve
+ * approve -> request APPROVED + user ACTIVE
+ */
+app.post(
+  "/admin/registration-requests/:id/approve",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const id = req.params.id;
+
+    const rr = await prisma.registrationRequest.findUnique({ where: { id } });
+    if (!rr) return res.status(404).json({ error: "Not found" });
+
+    if (rr.status !== "PENDING") return res.json({ ok: true, already: true });
+
+    await prisma.$transaction([
+      prisma.registrationRequest.update({
+        where: { id },
+        data: {
+          status: "APPROVED" as any,
+          reviewedBy: req.userId!,
+          reviewedAt: new Date(),
+        },
+      }),
+      prisma.user.update({
+        where: { id: rr.userId },
+        data: { status: "ACTIVE" as any },
+      }),
+    ]);
+
+    return res.json({ ok: true });
+  },
+);
+
+/**
+ * POST /admin/registration-requests/:id/reject
+ * reject -> request REJECTED + user BLOCKED
+ */
+app.post(
+  "/admin/registration-requests/:id/reject",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const id = req.params.id;
+
+    const rr = await prisma.registrationRequest.findUnique({ where: { id } });
+    if (!rr) return res.status(404).json({ error: "Not found" });
+
+    if (rr.status !== "PENDING") return res.json({ ok: true, already: true });
+
+    await prisma.$transaction([
+      prisma.registrationRequest.update({
+        where: { id },
+        data: {
+          status: "REJECTED" as any,
+          reviewedBy: req.userId!,
+          reviewedAt: new Date(),
+        },
+      }),
+      prisma.user.update({
+        where: { id: rr.userId },
+        data: { status: "BLOCKED" as any },
+      }),
+    ]);
+
+    return res.json({ ok: true });
+  },
+);
+
+/**
+ * GET /admin/users?status=ACTIVE|PENDING|BLOCKED&search=...
+ */
+app.get("/admin/users", requireAuth, requireAdmin, async (req, res) => {
+  const search = String(req.query.search ?? "").trim();
+  const status = String(req.query.status ?? "").toUpperCase();
+
+  const where: any = {};
+
+  if (["ACTIVE", "PENDING", "BLOCKED"].includes(status)) {
+    where.status = status;
+  }
+
+  if (search) {
+    where.OR = [{ email: { contains: search, mode: "insensitive" } }];
+  }
+
+  const items = await prisma.user.findMany({
+    where,
+    orderBy: { createdAt: "desc" },
+    take: 300,
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      createdAt: true,
+      registrationRequests: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { ip: true },
+      },
+    },
+  });
+
+  const mapped = items.map((u) => ({
+    id: u.id,
+    email: u.email,
+    role: u.role,
+    status: u.status,
+    createdAt: u.createdAt,
+    ip: u.registrationRequests[0]?.ip ?? "unknown",
+  }));
+
+  return res.json({ items: mapped });
+});
+
+const AdminUpdateUserSchema = z.object({
+  role: z.enum(["USER", "ADMIN"]).optional(),
+  status: z.enum(["ACTIVE", "PENDING", "BLOCKED"]).optional(),
+});
+
+/**
+ * PATCH /admin/users/:id
+ * body: { role?, status? }
+ */
+app.patch(
+  "/admin/users/:id",
+  requireAuth,
+  requireAdmin,
+  async (req: AuthedRequest, res) => {
+    const id = req.params.id;
+
+    const parsed = AdminUpdateUserSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ error: "Invalid input", details: parsed.error.flatten() });
+    }
+
+    const meId = req.userId!;
+
+    // защита от гениальных решений: не даём админу снять с себя ADMIN
+    if (id === meId && parsed.data.role === "USER") {
+      return res
+        .status(400)
+        .json({ error: "You cannot remove admin role from yourself" });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id },
+      data: parsed.data as any,
+      select: { id: true, email: true, role: true, status: true },
+    });
+
+    return res.json({ ok: true, user: updated });
+  },
+);
 
 const PORT = Number(process.env.PORT || 4000);
 
