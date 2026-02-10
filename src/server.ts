@@ -51,6 +51,15 @@ const cookieBase = {
   // domain: "gfta-api.online", // можно включить при желании. обычно не нужно.
 };
 
+type AdminUserItem = {
+  id: string;
+  email: string;
+  role: "USER" | "ADMIN";
+  status: "ACTIVE" | "PENDING" | "BLOCKED";
+  createdAt: Date;
+  registrationRequests: { ip: string }[];
+};
+
 function setAuthCookies(
   res: express.Response,
   accessToken: string,
@@ -238,7 +247,12 @@ app.post("/auth/signup", async (req, res) => {
   setAuthCookies(res, accessToken, refreshToken);
 
   return res.status(201).json({
-    user: { id: user.id, email: user.email },
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+    },
   });
 });
 
@@ -254,6 +268,16 @@ app.post("/auth/login", async (req, res) => {
 
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) return res.status(401).json({ error: "Invalid credentials" });
+
+  if (user.status === "BLOCKED") {
+    clearAuthCookies(res);
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  if (user.status === "PENDING") {
+    clearAuthCookies(res);
+    return res.status(403).json({ error: "Account pending approval" });
+  }
 
   const ok = await bcrypt.compare(password, user.passwordHash);
   if (!ok) return res.status(401).json({ error: "Invalid credentials" });
@@ -279,7 +303,12 @@ app.post("/auth/login", async (req, res) => {
   setAuthCookies(res, accessToken, refreshToken);
 
   return res.json({
-    user: { id: user.id, email: user.email },
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+    },
   });
 });
 
@@ -620,7 +649,7 @@ app.get("/admin/users", requireAuth, requireAdmin, async (req, res) => {
     },
   });
 
-  const mapped = items.map((u) => ({
+  const mapped = items.map((u: AdminUserItem) => ({
     id: u.id,
     email: u.email,
     role: u.role,
