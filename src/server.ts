@@ -104,8 +104,8 @@ const ChangePasswordSchema = z
     path: ["newPassword"],
   });
 
-function signAccessToken(userId: string) {
-  return jwt.sign({ sub: userId }, ACCESS_SECRET, {
+function signAccessToken(userId: string, role: string, status: string) {
+  return jwt.sign({ sub: userId, role, status }, ACCESS_SECRET, {
     expiresIn: `${ACCESS_TTL_MIN}m`,
   });
 }
@@ -242,7 +242,7 @@ app.post("/auth/signup", async (req, res) => {
     data: { refreshHash },
   });
 
-  const accessToken = signAccessToken(user.id);
+  const accessToken = signAccessToken(user.id, user.role, user.status);
 
   setAuthCookies(res, accessToken, refreshToken);
 
@@ -298,7 +298,7 @@ app.post("/auth/login", async (req, res) => {
     data: { refreshHash },
   });
 
-  const accessToken = signAccessToken(user.id);
+  const accessToken = signAccessToken(user.id, user.role, user.status);
 
   setAuthCookies(res, accessToken, refreshToken);
 
@@ -314,6 +314,7 @@ app.post("/auth/login", async (req, res) => {
 
 app.post("/auth/refresh", async (req, res) => {
   const refreshToken = req.cookies?.[cookieRefreshName];
+
   if (!refreshToken || typeof refreshToken !== "string") {
     clearAuthCookies(res);
     return res.status(401).json({ error: "No refresh token" });
@@ -329,6 +330,11 @@ app.post("/auth/refresh", async (req, res) => {
 
   const sessionId = payload.sid as string;
   const userId = payload.sub as string;
+
+  if (!sessionId || !userId) {
+    clearAuthCookies(res);
+    return res.status(401).json({ error: "Invalid refresh token" });
+  }
 
   const session = await prisma.session.findUnique({ where: { id: sessionId } });
   if (!session || session.userId !== userId) {
@@ -347,6 +353,27 @@ app.post("/auth/refresh", async (req, res) => {
     return res.status(401).json({ error: "Invalid refresh token" });
   }
 
+  // ✅ берём актуальные role/status из базы
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, email: true, role: true, status: true },
+  });
+
+  if (!user) {
+    clearAuthCookies(res);
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (user.status === "BLOCKED") {
+    // если юзера заблокировали в базе, выкидываем его сразу
+    await prisma.session
+      .deleteMany({ where: { userId: user.id } })
+      .catch(() => {});
+    clearAuthCookies(res);
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  // ✅ ротация refresh токена
   const newRefreshToken = signRefreshToken(session.id, userId);
   const newRefreshHash = await bcrypt.hash(newRefreshToken, BCRYPT_ROUNDS);
 
@@ -358,11 +385,16 @@ app.post("/auth/refresh", async (req, res) => {
     },
   });
 
-  const newAccessToken = signAccessToken(userId);
+  // ✅ access token теперь содержит role/status
+  const newAccessToken = signAccessToken(user.id, user.role, user.status);
 
   setAuthCookies(res, newAccessToken, newRefreshToken);
 
-  return res.json({ ok: true });
+  // ✅ возвращаем user, чтобы фронт обновил localStorage
+  return res.json({
+    ok: true,
+    user,
+  });
 });
 
 app.post("/auth/logout", async (req, res) => {
@@ -380,20 +412,6 @@ app.post("/auth/logout", async (req, res) => {
 
   clearAuthCookies(res);
   return res.json({ ok: true });
-});
-
-app.get("/auth/me", async (req, res) => {
-  const userId = getUserIdFromAccessCookie(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-  // updated: role/status added
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, email: true, role: true, status: true },
-  });
-  if (!user) return res.status(401).json({ error: "Unauthorized" });
-
-  return res.json({ user });
 });
 
 /**
