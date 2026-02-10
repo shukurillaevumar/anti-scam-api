@@ -38,17 +38,16 @@ if (!ACCESS_SECRET || !REFRESH_SECRET) {
  * - sameSite: "lax" для localhost
  * - sameSite: "none" + secure: true для продакшена если фронт и бэк на разных доменах
  */
-const isProd = process.env.NODE_ENV === "production";
 
 const cookieAccessName = process.env.COOKIE_ACCESS_NAME ?? "user_token";
 const cookieRefreshName = process.env.COOKIE_REFRESH_NAME ?? "refresh_token";
 
 const cookieBase = {
   httpOnly: true,
-  secure: isProd,
-  sameSite: (isProd ? "none" : "lax") as "none" | "lax",
+  secure: true,
+  sameSite: "none" as const,
   path: "/",
-  // domain: "gfta-api.online", // можно включить при желании. обычно не нужно.
+  // domain: "gfta-api.online", // обычно НЕ надо, оставь закомментированным
 };
 
 type AdminUserItem = {
