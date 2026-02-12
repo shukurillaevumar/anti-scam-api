@@ -36,7 +36,7 @@ model User {
   role   UserRole   @default(USER)
   status UserStatus @default(PENDING)
 
-  phone String @unique
+  phone String? @unique
 
   sessions Session[]
 
