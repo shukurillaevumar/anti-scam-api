@@ -6,6 +6,10 @@ import { z } from "zod";
 import cookieParser from "cookie-parser";
 import { prisma } from "./prisma";
 import path from "path";
+import {
+  parsePhoneNumberFromString,
+  type CountryCode,
+} from "libphonenumber-js";
 
 dotenv.config({ path: path.resolve("/var/www/anti-scam-api/.env") });
 
@@ -92,6 +96,10 @@ const AuthSchema = z.object({
   password: z.string().min(8).max(72),
 });
 
+const SignupSchema = AuthSchema.extend({
+  phone: z.string().min(6).max(30),
+});
+
 const ChangePasswordSchema = z
   .object({
     oldPassword: z.string().min(8).max(72),
@@ -148,6 +156,12 @@ function getClientIp(req: express.Request) {
   return typeof ra === "string" ? ra : "unknown";
 }
 
+function normalizePhone(raw: string, defaultCountry: CountryCode = "US") {
+  const s = raw.trim();
+  const p = parsePhoneNumberFromString(s, defaultCountry);
+  if (!p || !p.isValid()) return null;
+  return p.number; // E.164
+}
 type AuthedRequest = express.Request & { userId?: string };
 
 function requireAuth(
@@ -187,7 +201,7 @@ async function requireAdmin(
  */
 
 app.post("/auth/signup", async (req, res) => {
-  const parsed = AuthSchema.safeParse(req.body);
+  const parsed = SignupSchema.safeParse(req.body);
   if (!parsed.success) {
     return res
       .status(400)
@@ -195,6 +209,14 @@ app.post("/auth/signup", async (req, res) => {
   }
 
   const { email, password } = parsed.data;
+
+  const phone = normalizePhone(parsed.data.phone, "US");
+  if (!phone) {
+    return res.status(400).json({
+      error: "Invalid input",
+      details: { phone: ["Invalid phone number"] },
+    });
+  }
 
   const exists = await prisma.user.findUnique({ where: { email } });
   if (exists) return res.status(409).json({ error: "Email already in use" });
@@ -208,13 +230,13 @@ app.post("/auth/signup", async (req, res) => {
       ? req.headers["user-agent"]
       : undefined;
 
-  // ✅ создаём PENDING пользователя и заявку с IP (added)
   const user = await prisma.user.create({
     data: {
       email,
       passwordHash,
       role: "USER",
       status: "PENDING",
+      phone,
       registrationRequests: {
         create: {
           ip,
